@@ -1,13 +1,13 @@
 # Text-Complexity
 
-Für **DIS22a** — Analyse der Textkomplexität wissenschaftlicher Preprints (bioRxiv).  
+Für **DIS22a** — Analyse der Textkomplexität wissenschaftlicher Preprints (bioRxiv).
 TH Köln · Mai 2026
 
 ---
 
 ## Forschungsfrage
 
-> Verändert sich die Textkomplexität wissenschaftlicher Preprints zwischen Versionen systematisch?  
+> Verändert sich die Textkomplexität wissenschaftlicher Preprints zwischen Versionen systematisch?
 > Werden Papers von der ersten Preprint-Version (v1) über weitere Revisionen bis zur publizierten Fassung sprachlich **einfacher oder komplexer** — und gibt es dabei Muster, die über einzelne Papers hinaus stabil sind?
 
 ### Hypothesen
@@ -19,24 +19,25 @@ TH Köln · Mai 2026
 
 ---
 
-## Aktueller Stand
-
-Da Versionsdaten (v1/v2/final) noch nicht vorliegen, wird als **erster methodischer Schritt** die Komplexitätskurve *innerhalb* einzelner Papers analysiert: Wie verhalten sich die 6 Metriken entlang des Dokumentverlaufs (0–100 % Textposition)? Dies erlaubt, das Metrik-Verhalten in wissenschaftlichen Texten zu verstehen, bevor Versionsvergleiche möglich sind.
-
----
-
 ## Projektstruktur
 
 ```
-complexity_over_text.py   # Hauptskript: 6 Metriken als Sliding-Window über den Textverlauf
-src/
-    text_extraction.py    # JSON laden, Volltext bereinigen, Abschnitt extrahieren
-SampleData/
-    output/               # 499 JSON-Dateien (bioRxiv-Preprints)
-    metadata.json
-dois.txt                  # 959 DOIs für Versionsdaten (beantragt)
+complexity_over_versions.py   # Hauptanalyse: Metriken über die Versionshistorie (v1 → vN)
+dois.txt                      # 958 DOIs der untersuchten Preprints
 requirements.txt
+plots/                        # (gitignored) generierte Abbildungen
+data/                         # (gitignored) Rohdaten
+    xml/                      # JATS-XML je Paper-Version, Dateiname …_vN.xml
+    json/                     # JSON-Export je Paper-Version
+legacy/                       # Frühere Projektphase, nicht mehr Teil der Analyse
+    complexity_over_text.py   # Komplexität *innerhalb* eines Textes (0–100 % Position)
+    text_extraction.py        # JSON laden / Volltext bereinigen (nur vom Legacy-Skript genutzt)
 ```
+
+> **Legacy:** In der ersten Projektphase wurde — solange noch keine Versionsdaten vorlagen —
+> die Komplexitätskurve *innerhalb* einzelner Papers über die relative Textposition (0–100 %)
+> analysiert. Dieser Code liegt jetzt in `legacy/` und ist nicht mehr Teil der aktuellen
+> Auswertung. Die Forschungsfrage wird ausschließlich über die **Versionsentwicklung** beantwortet.
 
 ---
 
@@ -44,84 +45,109 @@ requirements.txt
 
 ```bash
 pip install -r requirements.txt
-python -m nltk.downloader punkt_tab averaged_perceptron_tagger_eng brown
+python -m nltk.downloader punkt_tab brown
 ```
 
 ## Ausführen
 
 ```bash
-python complexity_over_text.py              # Standard: 20 Dokumente
-python complexity_over_text.py --n 50       # 50 zufällige Dokumente
-python complexity_over_text.py --n all      # alle 499 Dokumente
-python complexity_over_text.py --n 30 --seed 7   # reproduzierbares Sample
+python complexity_over_versions.py                 # alle gültigen Papers
+python complexity_over_versions.py --n 200         # 200 zufällige Papers
+python complexity_over_versions.py --n 200 --seed 42   # reproduzierbares Sample
 ```
 
-Das Skript erzeugt `complexity_over_text.png` mit 6 Subplots (Metrik × Textposition).
+Das Skript erzeugt 13 Abbildungen im Ordner `plots/` — die Übersicht im Root,
+die sechs Sichten je in einem Unterordner pro Metrik-Gruppe:
+
+```
+plots/
+├── papers_per_version.png          # Anzahl Papers je Version (ganzer Korpus)
+├── simple_metrics/                 # Wortzahl, Sections, Figures, Tables, Refs, Satzlänge
+│   ├── normalized_over_versions.png    # % Änderung ggü. v1
+│   ├── stepwise_over_versions.png      # % Änderung ggü. Vorgänger
+│   ├── direction_over_versions.png     # Richtungs-Anteil je Schritt
+│   ├── distribution.png                # Verteilung der Netto-Änderung
+│   ├── scatter.png                     # Netto-Änderung × Monotonie
+│   └── baseline_change.png             # v1-Ausgangswert × Netto-Änderung
+└── complexity/                     # Flesch, Wortlänge, TTR, Rare-Word, Nominalisierung, Satzlänge
+    └── (dieselben sechs Dateien)
+```
+
+**Sechs Sichten auf dieselben Metriken:**
+
+- **Kumulativ (`normalized_over_versions.png`)** — % Änderung gegenüber **v1**: dünne Einzeltrajektorien
+  je Paper, überlagert von der fetten Mittelwertlinie über alle Papers und einem ± 1 SD Band
+  (Nulllinie = v1). Zeigt den **Netto-Effekt** der gesamten Überarbeitung (→ H1).
+- **Schrittweise (`stepwise_over_versions.png`)** — % Änderung gegenüber der **direkten Vorgängerversion**
+  (v1→v2, …, v5→v6) als Mittelwert ± 1 SD je Übergang. Zeigt, **wo** im Revisionsprozess
+  Änderung passiert (→ H2 „sukzessive").
+- **Richtung (`direction_over_versions.png`)** — gestapelte Balken je Übergang mit dem Anteil Papers, die
+  steigen / ~gleich bleiben / fallen (`|Δ| < 1 %` gilt als unverändert). Für Komplexitäts-
+  metriken nach Bedeutung als *einfacher / unverändert / komplexer* gelabelt, für einfache
+  Metriken neutral als *gestiegen / unverändert / gesunken*.
+- **Verteilung (`distribution.png`)** — Histogramm der **Netto-Änderung pro Paper**
+  (letzte Version vs. v1) mit Median-Linie und Anteil einfacher/komplexer. Deckt auf, ob ein
+  Mittelwert nahe 0 echte Stabilität bedeutet oder zwei gegenläufige Teilpopulationen verdeckt.
+- **Scatter (`scatter.png`)** — ein Punkt je Paper: x = **Netto-Änderung** (letzte vs. v1),
+  y = **Monotonie-Index** `|v_last − v1| / Σ|Schritt-Deltas|` (1 = stabil/linear, →0 = volatil).
+  Läuft über **alle** Papers (beliebige Versionszahl).
+- **Baseline-Change (`baseline_change.png`)** — ein Punkt je Paper: x = **v1-Ausgangswert**,
+  y = **Netto-Änderung** (% ggü. v1), mit Fit-Linie und Pearson r. Negative Steigung =
+  **Regression zur Mitte** (hoch startende Papers fallen, niedrig startende steigen →
+  Konvergenz). Über **alle** Papers.
 
 ---
 
 ## Datenbasis
 
-**499 JSON-Dateien** in `SampleData/output/`, je ein Paper. Relevante Felder pro Datei:
+Rohdaten liegen unter `data/` (gitignored) und stammen aus bioRxiv im **JATS-XML**-Format.
 
-- `text` — Volltext (pipe-delimited, wird von `_deep_clean()` bereinigt)
-- `metadata.pub_metadata.preprint_abstract` — Abstracttext
-- `metadata.pub_metadata.preprint_category` — Fachgebiet (z. B. `"neuroscience"`, `"bioinformatics"`)
-- `metadata.pub_metadata.published_journal` — Zieljournal
-- `metadata.pub_metadata.preprint_date` / `published_date` — Zeitstempel
+- `data/xml/` — eine XML-Datei je Paper-**Version**, benannt `…_vN.xml`
+- Versionszugehörigkeit wird über das `_vN`-Suffix im Dateinamen gruppiert
+- `dois.txt` — 958 DOIs der untersuchten Preprints
 
-**Top-Fachgebiete:** Neuroscience (96), Bioinformatics (43), Microbiology (34), Cell Biology (30), Cancer Biology (29)
+**Filterregeln** (`_scan_file_groups`): Ein Paper geht nur in die Auswertung ein, wenn es
+**genau die Versionen v1–v6** besitzt (`N_VERSIONS = 6`); Papers mit weniger oder mehr
+Versionen werden ausgeschlossen. Versionen mit < 300 Zeichen Volltext bzw. < 200 Wörtern
+werden verworfen — verliert ein Paper dadurch eine Version, fällt es ganz aus der Analyse.
 
-### Bekannte Datenprobleme
-
-- Volltext enthält Zeilennummern und Pipe-Formatierung vom PDF-Extraktor
-- Referenzliste ist **nicht** vom Fließtext getrennt → verzerrt Satzlänge und Wortlänge
-- Inline-Zitationen (`(Smith et al., 2021)`) erscheinen als Fließtext
-- Versionsdaten (v1, v2, publizierte Fassung) liegen noch nicht vor
-
----
-
-## Methodik: Sliding-Window-Analyse
-
-Das Skript berechnet 6 Komplexitätsmetriken in einem satzweise aufgebauten Sliding Window über den bereinigten Volltext jedes Papers.
-
-| Parameter | Wert | Bedeutung |
-|---|---|---|
-| `WINDOW_WORDS` | 200 | Wörter pro Fenster |
-| `STEP_WORDS` | 50 | Schrittweite (75 % Overlap) |
-| `N_BINS` | 50 | Positions-Buckets (0–100 %) |
-| `MIN_WORDS` | 800 | Mindestwörter nach Bereinigung |
-
-**Pipeline:**
-1. `_deep_clean()` — Pipe-Rows, Zeilennummern, Referenzlisten, Abbildungslegenden & Zitationen entfernen
-2. Satzweise Fenster aufbauen → Relative Position = Fenstermitte / Textlänge
-3. 6 Metriken je Fenster berechnen, Bin-Index zuweisen
-4. Mittelwert ± SD je Bin über alle n Papers, Glättung mit rollendem 5-Bin-Mittelwert
+**XML-Verarbeitung:** Abstract + Body werden rekursiv eingesammelt; `fig`, `table-wrap`,
+`supplementary-material`, `disp-formula` und `inline-formula` werden übersprungen, damit
+Abbildungs-, Tabellen- und Formelinhalte die Sprachmetriken nicht verzerren. Zusätzlich
+werden je Version Strukturzähler erfasst: Top-Level-Abschnitte, Abbildungen, Tabellen, Referenzen.
 
 ---
 
-## Komplexitätsmetriken
+## Metriken
 
-`complexity_over_text.py` berechnet folgende **6 Metriken**:
+Pro Version werden je Paper folgende Werte berechnet und als **% Änderung relativ zu v1**
+(v1 ≙ 0 %) ausgedrückt. Über alle Papers hinweg wird je Version der **Mittelwert ± SD**
+aggregiert und zusammen mit den Einzeltrajektorien dargestellt.
 
+### Einfache Textmetriken
+| Metrik | Basis |
+|---|---|
+| **Word Count** | Wörter gesamt |
+| **Top-level Sections** | Anzahl `sec`-Elemente im Body |
+| **Figures / Tables / References** | Anzahl `fig` / `table-wrap` / `ref` |
+| **Ø Satzlänge** | Wörter / Sätze |
+
+### Linguistische Komplexität
 | Metrik | Formel / Basis | Richtung |
 |---|---|---|
-| **Flesch Reading Ease** | 206.8 − 1.015·(W/S) − 84.6·(Syl/W) | höher = leichter (wiss. Text ≈ 0–30) |
-| **Ø Satzlänge** | Wörter / Sätze | höher = komplexer |
+| **Flesch Reading Ease** | 206.8 − 1.015·(W/S) − 84.6·(Syl/W) | höher = leichter |
 | **Ø Wortlänge** | Zeichen / Wörter | höher = schwierigere Wörter |
 | **Type-Token Ratio** | Unique Tokens / Tokens gesamt | höher = reicheres Vokabular |
-| **Rare-Word Rate** | Wörter ∉ Top-10 k / Gesamt | höher = mehr Fachvokabular |
-| **Nominalisierungsrate** | Nomen mit -tion/-ment/-ity/… / Gesamt | höher = formaler Schreibstil |
+| **Rare-Word Rate** | Wörter ∉ Top-10 k (Brown-Korpus) / Gesamt | höher = mehr Fachvokabular |
+| **Nominalisierungsrate** | Wörter mit -tion/-ment/-ity/… / Gesamt | höher = formaler Schreibstil |
 
-> **Hinweis:** Die README einer früheren Projektphase listete 12 Metriken (7× `textstat`, 5× linguistisch). Das Skript implementiert derzeit die obigen 6 selbst berechneten Metriken ohne externe Lesbarkeits-Libraries.
+Die Metriken werden ohne externe Lesbarkeits-Library selbst berechnet (nur `nltk` für
+Satz-Tokenisierung und das Brown-Korpus).
 
 ---
 
-## Datenwünsche
+## Bekannte Einschränkungen
 
-Folgende Daten würden die Analyse erheblich verbessern:
-
-1. **Mehrere Preprint-Versionen (v1, v2, …)** — Kern der Forschungsfrage; 959 DOIs bereits angefragt
-2. **Strukturierter Text mit Abschnittslabels** — Intro / Methods / Results / Discussion statt Textblob
-3. **Referenzliste getrennt vom Fließtext** — Literaturangaben verzerren Satz- und Wortlänge
-4. **Text ohne Inline-Zitationen** — `(Smith et al., 2021)` verzerrt mehrere Metriken
+- Silbenzählung (Flesch) ist eine Vokalgruppen-Heuristik, kein Lexikon.
+- Nominalisierung wird rein über Suffixe erkannt (kein POS-Tagging in der Versionsanalyse).
+- Die Rare-Word-Rate ist `NaN`, falls das NLTK-Brown-Korpus nicht verfügbar ist.

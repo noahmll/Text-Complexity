@@ -2,5 +2,8 @@ SampleData/
 .claude
 __pycache__/
 *.pyc
-*.png
-data/
+json/
+xml/
+__MACOSX/
+plots/
+.venv/

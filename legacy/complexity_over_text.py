@@ -25,12 +25,13 @@ import matplotlib.pyplot as plt
 import numpy as np
 
 # ── project paths ─────────────────────────────────────────────────────────────
+# NOTE: legacy script — analyses complexity *within* a single text. Kept for
+# reference only; the active analysis is ../complexity_over_versions.py.
 ROOT       = Path(__file__).parent
-SRC_DIR    = ROOT / "src"
-OUTPUT_DIR = ROOT / "SampleData" / "output"
-sys.path.insert(0, str(SRC_DIR))
+OUTPUT_DIR = ROOT.parent / "SampleData" / "output"
+sys.path.insert(0, str(ROOT))
 
-from text_extraction import clean_text  # existing cleaner from src/
+from text_extraction import clean_text  # legacy cleaner, now alongside this file
 
 # ── analysis parameters ───────────────────────────────────────────────────────
 WINDOW_WORDS = 200   # words per sliding window

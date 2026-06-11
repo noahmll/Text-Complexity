@@ -6,9 +6,16 @@ successive versions of bioRxiv preprints (JATS XML, data/xml/).
 
 Papers with version gaps or not starting at v1 are excluded.
 
-Outputs:
-    simple_metrics_over_versions.png
-    complexity_over_versions.png
+Outputs (written to plots/):
+    papers_per_version.png            bar chart of papers per version
+
+    simple_metrics/ and complexity/ each contain the same six views:
+    normalized_over_versions.png      % change vs v1 (trajectories + mean ±1 SD)
+    stepwise_over_versions.png        % change vs previous version (mean ±1 SD)
+    direction_over_versions.png       share up / ~equal / down per step
+    distribution.png                  histogram of per-paper net change (last vs v1)
+    scatter.png                       net change vs monotonicity (one point/paper)
+    baseline_change.png               v1 baseline vs net change (regression to mean)
 
 Usage:
     python complexity_over_versions.py              # all valid papers
@@ -28,23 +35,46 @@ from typing import Optional
 
 import matplotlib.pyplot as plt
 import numpy as np
+from tqdm import tqdm
 
-ROOT    = Path(__file__).parent
-XML_DIR = ROOT / "data" / "xml"
-sys.path.insert(0, str(ROOT / "src"))
+ROOT      = Path(__file__).parent
+XML_DIR   = ROOT / "data" / "xml"
+PLOTS_DIR = ROOT / "plots"
+
+# Only analyse papers with exactly these versions (v1 .. vN_VERSIONS).
+N_VERSIONS = 6
 
 # ── NLTK setup ────────────────────────────────────────────────────────────────
+def _ensure_resource(name: str, category: str) -> bool:
+    """Find an NLTK resource, downloading it if missing, and verify it loaded.
+
+    Returns True only if the resource is actually available afterwards, so a
+    silently failed download (e.g. offline) is reported instead of swallowed.
+    """
+    import nltk
+    path = f"{category}/{name}"
+    try:
+        nltk.data.find(path)
+        return True
+    except LookupError:
+        nltk.download(name, quiet=True)
+    try:
+        nltk.data.find(path)
+        return True
+    except LookupError:
+        return False
+
+
 def _setup_nltk() -> bool:
     try:
-        import nltk
-        for name, cat in [("punkt_tab", "tokenizers"), ("brown", "corpora")]:
-            try:
-                nltk.data.find(f"{cat}/{name}")
-            except LookupError:
-                nltk.download(name, quiet=True)
-        return True
-    except Exception:
+        import nltk  # noqa: F401
+    except ImportError:
         return False
+    # punkt_tab improves sentence tokenisation; brown backs the rare-word list.
+    ok = True
+    for name, cat in [("punkt_tab", "tokenizers"), ("brown", "corpora")]:
+        ok = _ensure_resource(name, cat) and ok
+    return ok
 
 NLTK_OK = _setup_nltk()
 
@@ -134,10 +164,40 @@ def parse_xml(path: Path) -> Optional[dict]:
 # LOADING & FILTERING
 # ═══════════════════════════════════════════════════════════════════════════════
 
-def _scan_file_groups(xml_dir: Path) -> dict:
+def _scan_version_distribution(xml_dir: Path) -> tuple[dict, int]:
+    """
+    Papers-per-version counts across the WHOLE corpus, independent of the
+    exact-v1..vN analysis filter — used only for the overview bar chart so it
+    also reflects papers with fewer or more versions. Counts every DOI group
+    whose versions run consecutively from v1 (>=2 versions); filename-only.
+    """
+    raw: dict = defaultdict(list)
+    for p in sorted(xml_dir.glob("*.xml")):
+        m = re.search(r"_v(\d+)$", p.stem)
+        if not m:
+            continue
+        raw[p.stem[: m.start()]].append(int(m.group(1)))
+
+    counts: dict = defaultdict(int)
+    n_papers = 0
+    for nums in raw.values():
+        nums = sorted(nums)
+        if len(nums) < 2 or nums != list(range(1, len(nums) + 1)):
+            continue
+        n_papers += 1
+        for v in nums:
+            counts[v] += 1
+    return dict(counts), n_papers
+
+
+def _scan_file_groups(xml_dir: Path, exact: bool = True) -> dict:
     """
     Group XML paths by DOI-key (filename stem without _vN) using only filenames —
-    no parsing. Returns only groups with consecutive versions starting at v1.
+    no parsing.
+
+    exact=True  → only groups that have exactly versions v1..vN_VERSIONS.
+    exact=False → any group whose versions run consecutively from v1 (>=2),
+                  i.e. papers with fewer or more versions are also included.
     """
     raw_groups: dict = defaultdict(list)
     for p in sorted(xml_dir.glob("*.xml")):
@@ -147,28 +207,33 @@ def _scan_file_groups(xml_dir: Path) -> dict:
         doi_key = p.stem[: m.start()]
         raw_groups[doi_key].append((int(m.group(1)), p))
 
+    expected = list(range(1, N_VERSIONS + 1))
     valid: dict = {}
     for key, entries in raw_groups.items():
         entries.sort()
         nums = [v for v, _ in entries]
-        if nums[0] != 1:
-            continue
-        if nums != list(range(1, len(nums) + 1)):
-            continue
-        if len(nums) < 2:
-            continue
+        if exact:
+            if nums != expected:
+                continue
+        else:
+            if len(nums) < 2 or nums != list(range(1, len(nums) + 1)):
+                continue
         valid[key] = [p for _, p in entries]
     return valid
 
 
-def load_papers(xml_dir: Path, n: Optional[int], seed: Optional[int]) -> dict:
+def load_papers(xml_dir: Path, n: Optional[int], seed: Optional[int],
+                exact: bool = True) -> dict:
     """
     Scan filenames to identify valid papers first, subsample if needed,
-    then parse only the selected files.
+    then parse only the selected files. With exact=False, papers with any
+    number of consecutive-from-v1 versions (>=2) are loaded.
     """
     print("Scanning XML filenames ...", flush=True)
-    file_groups = _scan_file_groups(xml_dir)
-    print(f"Valid papers (consecutive from v1, >=2 versions): {len(file_groups)}", flush=True)
+    file_groups = _scan_file_groups(xml_dir, exact=exact)
+    label = (f"exactly v1..v{N_VERSIONS}" if exact
+             else "consecutive from v1, >=2 versions")
+    print(f"Valid papers ({label}): {len(file_groups)}", flush=True)
 
     if n is not None and n < len(file_groups):
         rng = random.Random(seed)
@@ -180,15 +245,16 @@ def load_papers(xml_dir: Path, n: Optional[int], seed: Optional[int]) -> dict:
     print(f"Parsing {total_files} XML files ...", flush=True)
 
     papers: dict = {}
-    for i, (key, paths) in enumerate(file_groups.items()):
-        if i and i % 100 == 0:
-            print(f"  {i}/{len(file_groups)} papers", flush=True)
+    for key, paths in tqdm(file_groups.items(), total=len(file_groups),
+                           unit="papers", leave=False):
         versions = []
         for p in paths:
             d = parse_xml(p)
             if d and len(d["full_text"]) > 300:
                 versions.append(d)
-        if len(versions) >= 2:
+        # A version may drop out if its text is too short; keep papers that
+        # still have enough versions for the requested mode.
+        if (exact and len(versions) == N_VERSIONS) or (not exact and len(versions) >= 2):
             papers[versions[0]["doi"]] = versions
 
     return papers
@@ -264,7 +330,8 @@ def build_paper_metrics(papers: dict) -> dict:
     Returns {doi: {version: {metric: value}}}.
     """
     result = {}
-    for doi, versions in papers.items():
+    for doi, versions in tqdm(papers.items(), total=len(papers),
+                              unit="papers", leave=False):
         paper_data = {}
         for vd in versions:
             v = vd["version"]
@@ -287,16 +354,30 @@ def _clean_val(v) -> bool:
     return v is not None and not (isinstance(v, float) and (np.isnan(v) or np.isinf(v)))
 
 
-def aggregate_absolute(paper_metrics: dict) -> tuple:
-    """Per-version mean ± SD in absolute values across all papers."""
-    by_v: dict = defaultdict(lambda: defaultdict(list))
+def build_normalized_paper_metrics(paper_metrics: dict) -> dict:
+    """
+    Per-paper % change of each metric relative to that paper's own v1 (v1 = 0 %).
+    Returns {doi: {version: {metric: pct_change}}}. Metrics whose v1 baseline is
+    missing or zero are omitted for that paper, mirroring aggregate_normalized().
+    """
+    result: dict = {}
     for doi, versions in paper_metrics.items():
+        v1 = versions.get(1)
+        if not v1:
+            continue
+        pdata: dict = {}
         for v, metrics in versions.items():
+            entry = {}
             for k, val in metrics.items():
-                if _clean_val(val):
-                    by_v[v][k].append(val)
-    n_at_v = {v: len(by_v[v].get("n_sections", [])) for v in by_v}
-    return {v: dict(d) for v, d in by_v.items()}, n_at_v
+                baseline = v1.get(k)
+                if not _clean_val(baseline) or not _clean_val(val):
+                    continue
+                if abs(baseline) < 1e-9:
+                    continue
+                entry[k] = 0.0 if v == 1 else (val - baseline) / abs(baseline) * 100
+            pdata[v] = entry
+        result[doi] = pdata
+    return result
 
 
 def aggregate_normalized(paper_metrics: dict) -> tuple:
@@ -320,6 +401,82 @@ def aggregate_normalized(paper_metrics: dict) -> tuple:
                 by_v[v][k].append(pct if v > 1 else 0.0)
     n_at_v = {v: len(by_v[v].get("n_sections", [])) for v in by_v}
     return {v: dict(d) for v, d in by_v.items()}, n_at_v
+
+
+def aggregate_stepwise(paper_metrics: dict) -> dict:
+    """
+    Per-step % change relative to the IMMEDIATELY PRECEDING version.
+    Returns {v: {metric: [pct change from v-1 to v]}} for v = 2..N.
+    Complements aggregate_normalized() (which is always relative to v1).
+    """
+    by_step: dict = defaultdict(lambda: defaultdict(list))
+    for doi, versions in paper_metrics.items():
+        for v in sorted(versions):
+            if v == 1:
+                continue
+            prev, cur = versions.get(v - 1), versions.get(v)
+            if not prev or not cur:
+                continue
+            for k, val in cur.items():
+                base = prev.get(k)
+                if not _clean_val(base) or not _clean_val(val) or abs(base) < 1e-9:
+                    continue
+                by_step[v][k].append((val - base) / abs(base) * 100)
+    return {v: dict(d) for v, d in by_step.items()}
+
+
+def build_net_change(paper_metrics: dict) -> dict:
+    """
+    Per-paper NET % change of each metric: last version vs v1.
+    Returns {metric: [pct change, ...]} across papers — the raw material for the
+    distribution view, so we can see whether a near-zero mean hides two opposing
+    sub-populations rather than genuine stability.
+    """
+    out: dict = defaultdict(list)
+    for doi, versions in paper_metrics.items():
+        v1   = versions.get(1)
+        last = versions.get(max(versions)) if versions else None
+        if not v1 or not last:
+            continue
+        for k, val in last.items():
+            base = v1.get(k)
+            if not _clean_val(base) or not _clean_val(val) or abs(base) < 1e-9:
+                continue
+            out[k].append((val - base) / abs(base) * 100)
+    return dict(out)
+
+
+def build_trajectory_features(paper_metrics: dict, keys: list) -> dict:
+    """
+    Per-paper trajectory summary for each metric, across ALL papers (>=2 versions,
+    any version count):
+      - base : the v1 (baseline) value in the metric's natural units
+      - net  : net % change of the last version vs v1  (signed magnitude)
+      - mono : monotonicity index |v_last - v1| / Σ|step deltas|  in [0, 1]
+               (1 = perfectly linear/stable path, →0 = lots of back-and-forth).
+      - nver : number of versions of the paper
+    A paper that never moves (Σ deltas ≈ 0) is treated as perfectly monotone (1).
+    Returns {metric: {"base": [...], "net": [...], "mono": [...], "nver": [...]}}.
+    """
+    feats = {k: {"base": [], "net": [], "mono": [], "nver": []} for k in keys}
+    for doi, versions in paper_metrics.items():
+        vs = sorted(versions)
+        if len(vs) < 2:
+            continue
+        for k in keys:
+            seq = [versions[v].get(k) for v in vs]
+            if any(not _clean_val(x) for x in seq):
+                continue
+            first, last = seq[0], seq[-1]
+            if abs(first) < 1e-9:
+                continue
+            total_var = sum(abs(seq[i + 1] - seq[i]) for i in range(len(seq) - 1))
+            mono = 1.0 if total_var < 1e-12 else abs(last - first) / total_var
+            feats[k]["base"].append(first)
+            feats[k]["net"].append((last - first) / abs(first) * 100)
+            feats[k]["mono"].append(mono)
+            feats[k]["nver"].append(len(vs))
+    return feats
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -346,14 +503,32 @@ _COMPLEX_SPECS = [
 
 _COLORS = ["#2166AC", "#1A9850", "#D6604D", "#762A83", "#E08214", "#4D4D4D"]
 
+# Direction-of-change config (step view).
+_STEP_THRESHOLD = 1.0  # |% change| below this counts as "unchanged"
 
-def _xtick_labels(xs: list, n_at_v: dict) -> list:
-    return [f"v{int(x)}\n(n={n_at_v.get(int(x), '?')})" for x in xs]
+# For complexity metrics: does an INCREASE make the text simpler (-1) or more
+# complex (+1)? Used to label the direction bars semantically.
+_COMPLEXITY_POLARITY = {
+    "flesch":              -1,  # higher Flesch Reading Ease = easier to read
+    "avg_word_len":        +1,
+    "ttr":                 +1,
+    "rare_word_rate":      +1,
+    "nominalization_rate": +1,
+    "avg_sent_len":        +1,
+}
 
 
-def _plot_spaghetti_grid(
-    paper_metrics: dict,
-    by_v: dict,
+def _xtick_labels(xs: list) -> list:
+    return [f"v{int(x)}" for x in xs]
+
+
+def _step_labels(steps: list) -> list:
+    return [f"v{int(v) - 1}→v{int(v)}" for v in steps]
+
+
+def _plot_normalized_spaghetti_grid(
+    norm_paper_metrics: dict,
+    by_v_norm: dict,
     n_at_v: dict,
     specs: list,
     title: str,
@@ -361,11 +536,14 @@ def _plot_spaghetti_grid(
     min_n: int = 3,
     max_lines: int = 400,
 ) -> None:
-    """Spaghetti plot: individual paper trajectories (thin, transparent) + bold mean."""
-    versions = sorted(v for v in by_v if n_at_v.get(v, 0) >= min_n)
+    """
+    Combined view per metric: individual paper trajectories as % change from v1
+    (thin, transparent) overlaid with the bold cross-paper mean and a ±1 SD band.
+    """
+    versions = sorted(v for v in by_v_norm if n_at_v.get(v, 0) >= min_n)
 
     # Subsample papers for display if corpus is large
-    doi_list = list(paper_metrics.keys())
+    doi_list = list(norm_paper_metrics.keys())
     if len(doi_list) > max_lines:
         doi_list = random.Random(0).sample(doi_list, max_lines)
 
@@ -373,64 +551,22 @@ def _plot_spaghetti_grid(
     axes = axes.flatten()
     fig.suptitle(title, fontsize=13, fontweight="bold")
 
-    for idx, ((key, label, unit), color) in enumerate(zip(specs, _COLORS)):
+    for idx, ((key, label, _unit), color) in enumerate(zip(specs, _COLORS)):
         ax = axes[idx]
+        ax.axhline(0, color="gray", lw=1, linestyle="--", alpha=0.6, zorder=1)
 
-        # Individual paper lines
+        # Individual normalized paper lines (collect values for robust y-limits)
+        line_vals: list = []
         for doi in doi_list:
-            pv = paper_metrics[doi]
-            xs_p = sorted(v for v in pv if _clean_val(pv[v].get(key)))
+            pv = norm_paper_metrics[doi]
+            xs_p = sorted(v for v in pv if v in versions and _clean_val(pv[v].get(key)))
             if len(xs_p) < 2:
                 continue
             ys_p = [pv[v][key] for v in xs_p]
-            ax.plot(xs_p, ys_p, lw=0.5, alpha=0.08, color=color)
+            line_vals.extend(ys_p)
+            ax.plot(xs_p, ys_p, lw=0.5, alpha=0.08, color=color, zorder=2)
 
-        # Bold mean line
-        xs, means = [], []
-        for v in versions:
-            vals = [x for x in by_v[v].get(key, []) if _clean_val(x)]
-            if vals:
-                xs.append(v)
-                means.append(np.mean(vals))
-
-        if not xs:
-            ax.text(0.5, 0.5, "no data", ha="center", va="center",
-                    transform=ax.transAxes, color="gray")
-            ax.set_title(label, fontsize=10, fontweight="bold")
-            continue
-
-        ax.plot(xs, means, "o-", lw=2.5, ms=5, color=color, zorder=5, label="mean")
-        ax.set_title(label, fontsize=10, fontweight="bold")
-        ax.set_ylabel(unit, fontsize=8)
-        ax.set_xlabel("Version", fontsize=8)
-        ax.set_xticks(xs)
-        ax.set_xticklabels(_xtick_labels(xs, n_at_v), fontsize=7)
-        ax.grid(True, alpha=0.3, linestyle="--")
-        if idx == 0:
-            ax.legend(fontsize=8)
-
-    plt.tight_layout()
-    plt.savefig(outpath, dpi=150, bbox_inches="tight")
-    print(f"Saved -> {outpath}")
-
-
-def _plot_normalized_grid(
-    by_v_norm: dict,
-    n_at_v: dict,
-    specs: list,
-    title: str,
-    outpath: Path,
-    min_n: int = 3,
-) -> None:
-    """% change from v1: mean line + shaded ±1 SD band."""
-    versions = sorted(v for v in by_v_norm if n_at_v.get(v, 0) >= min_n)
-
-    fig, axes = plt.subplots(2, 3, figsize=(15, 8))
-    axes = axes.flatten()
-    fig.suptitle(title, fontsize=13, fontweight="bold")
-
-    for idx, ((key, label, _unit), color) in enumerate(zip(specs, _COLORS)):
-        ax = axes[idx]
+        # Bold mean line + ±1 SD band
         xs, means, stds = [], [], []
         for v in versions:
             vals = [x for x in by_v_norm[v].get(key, []) if _clean_val(x)]
@@ -446,22 +582,357 @@ def _plot_normalized_grid(
             continue
 
         xs, means, stds = np.array(xs), np.array(means), np.array(stds)
+        ax.fill_between(xs, means - stds, means + stds, alpha=0.18,
+                        color=color, zorder=3, label="±1 SD")
+        ax.plot(xs, means, "o-", lw=2.5, ms=5, color=color, zorder=5,
+                label="mean % change")
 
-        ax.axhline(0, color="gray", lw=1, linestyle="--", alpha=0.6, zorder=1)
-        ax.plot(xs, means, "o-", lw=2, ms=5, color=color, zorder=5, label="mean % change")
-        ax.fill_between(xs, means - stds, means + stds, alpha=0.18, color=color, label="+/-1 SD")
         ax.set_title(label, fontsize=10, fontweight="bold")
         ax.set_ylabel("% change from v1", fontsize=8)
         ax.set_xlabel("Version", fontsize=8)
         ax.set_xticks(xs)
-        ax.set_xticklabels(_xtick_labels(xs, n_at_v), fontsize=7)
+        ax.set_xticklabels(_xtick_labels(xs), fontsize=7)
+        ax.grid(True, alpha=0.3, linestyle="--")
+        if idx == 0:
+            ax.legend(fontsize=8)
+
+        # Robust y-limits: clip extreme individual outliers (1st–99th pct) but
+        # always keep the mean ± SD band fully visible.
+        if line_vals:
+            lo, hi = np.percentile(line_vals, [1, 99])
+            lo = min(lo, float((means - stds).min()))
+            hi = max(hi, float((means + stds).max()))
+            pad = max(1.0, 0.05 * (hi - lo))
+            ax.set_ylim(lo - pad, hi + pad)
+
+    plt.tight_layout()
+    plt.savefig(outpath, dpi=150, bbox_inches="tight")
+
+
+def _plot_version_distribution(n_at_v: dict, n_total: int, outpath: Path) -> None:
+    """Bar chart of how many papers contribute at each version."""
+    versions = sorted(n_at_v)
+    counts   = [n_at_v[v] for v in versions]
+
+    fig, ax = plt.subplots(figsize=(9, 5))
+    bars = ax.bar([f"v{v}" for v in versions], counts,
+                  color="#2166AC", edgecolor="white")
+    ax.bar_label(bars, fontsize=8, padding=2)
+
+    ax.set_title(f"Papers per Version  (n={n_total} papers)",
+                 fontsize=12, fontweight="bold")
+    ax.set_xlabel("Version", fontsize=9)
+    ax.set_ylabel("Number of papers", fontsize=9)
+    ax.grid(True, axis="y", alpha=0.3, linestyle="--")
+    ax.set_axisbelow(True)
+
+    plt.tight_layout()
+    plt.savefig(outpath, dpi=150, bbox_inches="tight")
+
+
+def _plot_stepwise_grid(
+    by_step: dict,
+    specs: list,
+    title: str,
+    outpath: Path,
+) -> None:
+    """Mean % change vs the preceding version per transition, with ±1 SD band."""
+    steps = sorted(by_step)
+
+    fig, axes = plt.subplots(2, 3, figsize=(15, 8))
+    axes = axes.flatten()
+    fig.suptitle(title, fontsize=13, fontweight="bold")
+
+    for idx, ((key, label, _unit), color) in enumerate(zip(specs, _COLORS)):
+        ax = axes[idx]
+        ax.axhline(0, color="gray", lw=1, linestyle="--", alpha=0.6, zorder=1)
+
+        xs, means, stds = [], [], []
+        for v in steps:
+            vals = [x for x in by_step[v].get(key, []) if _clean_val(x)]
+            if vals:
+                xs.append(v)
+                means.append(np.mean(vals))
+                stds.append(np.std(vals))
+
+        if not xs:
+            ax.text(0.5, 0.5, "no data", ha="center", va="center",
+                    transform=ax.transAxes, color="gray")
+            ax.set_title(label, fontsize=10, fontweight="bold")
+            continue
+
+        pos = np.arange(len(xs))
+        means, stds = np.array(means), np.array(stds)
+        ax.fill_between(pos, means - stds, means + stds, alpha=0.18,
+                        color=color, zorder=3, label="±1 SD")
+        ax.plot(pos, means, "o-", lw=2.5, ms=5, color=color, zorder=5,
+                label="mean % change")
+
+        ax.set_title(label, fontsize=10, fontweight="bold")
+        ax.set_ylabel("% change vs previous", fontsize=8)
+        ax.set_xlabel("Version step", fontsize=8)
+        ax.set_xticks(pos)
+        ax.set_xticklabels(_step_labels(xs), fontsize=7)
         ax.grid(True, alpha=0.3, linestyle="--")
         if idx == 0:
             ax.legend(fontsize=8)
 
     plt.tight_layout()
     plt.savefig(outpath, dpi=150, bbox_inches="tight")
-    print(f"Saved -> {outpath}")
+
+
+def _plot_direction_grid(
+    by_step: dict,
+    specs: list,
+    title: str,
+    outpath: Path,
+    semantic: bool,
+    threshold: float = _STEP_THRESHOLD,
+) -> None:
+    """
+    Stacked bars per transition: share of papers that go up / stay ~equal / go
+    down (|Δ| < threshold counts as unchanged). When `semantic`, up/down are
+    relabelled as simpler / more complex via _COMPLEXITY_POLARITY.
+    """
+    steps = sorted(by_step)
+
+    fig, axes = plt.subplots(2, 3, figsize=(15, 8))
+    axes = axes.flatten()
+    fig.suptitle(title, fontsize=13, fontweight="bold")
+
+    for idx, (key, label, _unit) in enumerate(specs):
+        ax = axes[idx]
+
+        xs, up, flat, down = [], [], [], []
+        for v in steps:
+            vals = [x for x in by_step[v].get(key, []) if _clean_val(x)]
+            if not vals:
+                continue
+            n = len(vals)
+            u = sum(1 for x in vals if x > threshold) / n * 100
+            d = sum(1 for x in vals if x < -threshold) / n * 100
+            xs.append(v)
+            up.append(u)
+            down.append(d)
+            flat.append(100 - u - d)
+
+        if not xs:
+            ax.text(0.5, 0.5, "no data", ha="center", va="center",
+                    transform=ax.transAxes, color="gray")
+            ax.set_title(label, fontsize=10, fontweight="bold")
+            continue
+
+        pos = np.arange(len(xs))
+        up, flat, down = np.array(up), np.array(flat), np.array(down)
+
+        if semantic and _COMPLEXITY_POLARITY.get(key, 1) < 0:
+            simpler, harder = up, down           # increase = simpler (e.g. Flesch)
+        elif semantic:
+            simpler, harder = down, up           # increase = more complex
+        if semantic:
+            ax.bar(pos, simpler, color="#1A9850", label="simpler")
+            ax.bar(pos, flat, bottom=simpler, color="#BBBBBB", label="~unchanged")
+            ax.bar(pos, harder, bottom=simpler + flat, color="#D6604D",
+                   label="more complex")
+        else:
+            ax.bar(pos, down, color="#E08214", label="decreased")
+            ax.bar(pos, flat, bottom=down, color="#BBBBBB", label="~unchanged")
+            ax.bar(pos, up, bottom=down + flat, color="#2166AC", label="increased")
+
+        ax.set_title(label, fontsize=10, fontweight="bold")
+        ax.set_ylabel("% of papers", fontsize=8)
+        ax.set_xlabel("Version step", fontsize=8)
+        ax.set_xticks(pos)
+        ax.set_xticklabels(_step_labels(xs), fontsize=7)
+        ax.set_ylim(0, 100)
+        if idx == 0:
+            ax.legend(fontsize=7, loc="lower center", ncol=3)
+
+    plt.tight_layout()
+    plt.savefig(outpath, dpi=150, bbox_inches="tight")
+
+
+def _plot_netchange_distribution(
+    net_change: dict,
+    specs: list,
+    title: str,
+    outpath: Path,
+    semantic: bool,
+    threshold: float = _STEP_THRESHOLD,
+) -> None:
+    """
+    Histogram of the per-paper net % change (last version vs v1) for each metric.
+    A single peak at 0 means genuine stability; a wide or bimodal spread means a
+    near-zero mean is hiding opposing sub-populations. Median line + share of
+    papers that end up simpler / more complex (or up / down) are annotated.
+    """
+    fig, axes = plt.subplots(2, 3, figsize=(15, 8))
+    axes = axes.flatten()
+    fig.suptitle(title, fontsize=13, fontweight="bold")
+
+    for idx, ((key, label, _unit), color) in enumerate(zip(specs, _COLORS)):
+        ax = axes[idx]
+        vals = np.array([x for x in net_change.get(key, []) if _clean_val(x)])
+
+        if vals.size == 0:
+            ax.text(0.5, 0.5, "no data", ha="center", va="center",
+                    transform=ax.transAxes, color="gray")
+            ax.set_title(label, fontsize=10, fontweight="bold")
+            continue
+
+        # Clip extreme outliers (1st–99th pct) for a readable x-range.
+        lo, hi = np.percentile(vals, [1, 99])
+        if hi <= lo:
+            lo, hi = vals.min() - 1, vals.max() + 1
+        clipped = vals[(vals >= lo) & (vals <= hi)]
+
+        ax.hist(clipped, bins=30, range=(lo, hi),
+                color=color, alpha=0.75, edgecolor="white")
+        ax.axvline(0, color="gray", lw=1.2, linestyle="--", zorder=4)
+        median = float(np.median(vals))
+        ax.axvline(median, color="black", lw=1.6, zorder=5,
+                   label=f"median {median:+.1f}%")
+
+        # Share of papers per direction (|Δ| < threshold = unchanged).
+        n = vals.size
+        up   = (vals > threshold).sum()  / n * 100
+        down = (vals < -threshold).sum() / n * 100
+        if semantic and _COMPLEXITY_POLARITY.get(key, 1) < 0:
+            simpler, harder = up, down
+        else:
+            simpler, harder = down, up
+        note = (f"{simpler:.0f}% simpler\n{harder:.0f}% complex" if semantic
+                else f"{up:.0f}% up\n{down:.0f}% down")
+        ax.text(0.97, 0.95, note, transform=ax.transAxes, fontsize=8,
+                ha="right", va="top",
+                bbox=dict(boxstyle="round", fc="white", ec="0.8", alpha=0.85))
+
+        ax.set_title(label, fontsize=10, fontweight="bold")
+        ax.set_xlabel("net % change (last vs v1)", fontsize=8)
+        ax.set_ylabel("papers", fontsize=8)
+        ax.grid(True, axis="y", alpha=0.3, linestyle="--")
+        ax.set_axisbelow(True)
+        ax.legend(fontsize=8, loc="upper left")
+
+    plt.tight_layout()
+    plt.savefig(outpath, dpi=150, bbox_inches="tight")
+
+
+def _padded_limits(lo: float, hi: float, frac: float = 0.05) -> tuple:
+    """Expand a [lo, hi] range by `frac` on each side so points never sit on the
+    axis border. Falls back to a small symmetric pad when the range is degenerate."""
+    span = hi - lo
+    pad = frac * span if span > 0 else (abs(hi) * frac or 1.0)
+    return lo - pad, hi + pad
+
+
+def _plot_trajectory_scatter(
+    feats: dict,
+    specs: list,
+    title: str,
+    outpath: Path,
+) -> None:
+    """
+    Scatter per metric: net % change (last vs v1, x) versus the monotonicity
+    index (y; 1 = stable/linear, 0 = volatile). One point per paper, across all
+    papers regardless of version count.
+    """
+    fig, axes = plt.subplots(2, 3, figsize=(15, 8), constrained_layout=True)
+    axes = axes.flatten()
+    fig.suptitle(title, fontsize=13, fontweight="bold")
+
+    for idx, ((key, label, _unit), color) in enumerate(zip(specs, _COLORS)):
+        ax = axes[idx]
+        xs = np.array(feats[key]["net"])
+        ys = np.array(feats[key]["mono"])
+
+        if xs.size == 0:
+            ax.text(0.5, 0.5, "no data", ha="center", va="center",
+                    transform=ax.transAxes, color="gray")
+            ax.set_title(label, fontsize=10, fontweight="bold")
+            continue
+
+        # Clip x to 1st–99th pct so a few extreme papers don't squash the cloud.
+        lo, hi = np.percentile(xs, [1, 99])
+        if hi <= lo:
+            lo, hi = xs.min() - 1, xs.max() + 1
+        m = (xs >= lo) & (xs <= hi)
+
+        ax.scatter(xs[m], ys[m], s=10, alpha=0.35, color=color, edgecolors="none")
+        ax.axvline(0, color="gray", lw=1.2, linestyle="--", zorder=1)
+        median = float(np.median(xs))
+        ax.axvline(median, color="black", lw=1.4, zorder=2,
+                   label=f"median Δ {median:+.1f}%")
+
+        ax.set_title(label, fontsize=10, fontweight="bold")
+        ax.set_xlabel("net % change (last vs v1)", fontsize=8)
+        ax.set_ylabel("monotonicity (1=linear, 0=volatile)", fontsize=8)
+        ax.set_xlim(*_padded_limits(lo, hi))
+        ax.set_ylim(*_padded_limits(0.0, 1.0))
+        ax.grid(True, alpha=0.3, linestyle="--")
+        ax.set_axisbelow(True)
+        ax.legend(fontsize=8, loc="lower right")
+
+    plt.savefig(outpath, dpi=150, bbox_inches="tight")
+
+
+def _plot_baseline_change_scatter(
+    feats: dict,
+    specs: list,
+    title: str,
+    outpath: Path,
+) -> None:
+    """
+    Regression-to-the-mean view per metric: v1 baseline value (x) versus net %
+    change (y), one point per paper (all version counts), coloured by version
+    count. A downward trend (negative correlation) means papers that start high
+    tend to drop and papers that start low tend to rise — convergence. A fitted
+    line and Pearson r are annotated.
+
+    Caveat: measurement noise alone induces some negative baseline-change
+    correlation, so a mild slope is not necessarily a real effect.
+    """
+    fig, axes = plt.subplots(2, 3, figsize=(15, 8), constrained_layout=True)
+    axes = axes.flatten()
+    fig.suptitle(title, fontsize=13, fontweight="bold")
+
+    for idx, ((key, label, unit), color) in enumerate(zip(specs, _COLORS)):
+        ax = axes[idx]
+        bx = np.array(feats[key]["base"])
+        ny = np.array(feats[key]["net"])
+
+        if bx.size < 3:
+            ax.text(0.5, 0.5, "no data", ha="center", va="center",
+                    transform=ax.transAxes, color="gray")
+            ax.set_title(label, fontsize=10, fontweight="bold")
+            continue
+
+        # Correlation on full data; clip both axes (1–99 pct) for display only.
+        r = float(np.corrcoef(bx, ny)[0, 1])
+        xlo, xhi = np.percentile(bx, [1, 99])
+        ylo, yhi = np.percentile(ny, [1, 99])
+        m = (bx >= xlo) & (bx <= xhi) & (ny >= ylo) & (ny <= yhi)
+
+        ax.scatter(bx[m], ny[m], s=10, alpha=0.35, color=color, edgecolors="none")
+        ax.axhline(0, color="gray", lw=1.2, linestyle="--", zorder=1)
+
+        # Least-squares trend line over the displayed range.
+        if xhi > xlo:
+            slope, intercept = np.polyfit(bx, ny, 1)
+            xx = np.array([xlo, xhi])
+            ax.plot(xx, slope * xx + intercept, color="black", lw=1.6, zorder=4,
+                    label=f"fit (r={r:+.2f})")
+
+        ax.set_title(label, fontsize=10, fontweight="bold")
+        ax.set_xlabel(f"v1 baseline ({unit})", fontsize=8)
+        ax.set_ylabel("net % change (last vs v1)", fontsize=8)
+        ax.set_xlim(*_padded_limits(xlo, xhi))
+        ax.set_ylim(*_padded_limits(ylo, yhi))
+        ax.grid(True, alpha=0.3, linestyle="--")
+        ax.set_axisbelow(True)
+        ax.legend(fontsize=8, loc="upper right")
+
+    plt.savefig(outpath, dpi=150, bbox_inches="tight")
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -475,7 +946,9 @@ def main() -> None:
     args = ap.parse_args()
 
     n = None if args.n.lower() == "all" else int(args.n)
-    papers = load_papers(XML_DIR, n, args.seed)
+    # Load the broad set (>=2 consecutive versions from v1); the exactly-v1..vN
+    # subset for the version-aligned views is derived from it below.
+    papers = load_papers(XML_DIR, n, args.seed, exact=False)
 
     if not papers:
         sys.exit("No valid papers found.")
@@ -484,39 +957,115 @@ def main() -> None:
         print("Warning: NLTK Brown corpus unavailable -- rare-word rate will be NaN.")
 
     print("Computing metrics ...", flush=True)
-    paper_metrics           = build_paper_metrics(papers)
-    by_v,      n_at_v      = aggregate_absolute(paper_metrics)
-    by_v_norm, n_at_v_norm = aggregate_normalized(paper_metrics)
-    print(f"Papers per version: { {v: n_at_v[v] for v in sorted(n_at_v)} }")
+    paper_metrics = build_paper_metrics(papers)
 
-    n_total = len(paper_metrics)
+    # Exactly-v1..vN subset: version-aligned and distribution views need the same
+    # version axis and a constant n across versions.
+    expected_versions = set(range(1, N_VERSIONS + 1))
+    pm_exact = {doi: pv for doi, pv in paper_metrics.items()
+                if set(pv) == expected_versions}
+    print(f"Papers: {len(paper_metrics)} total (>=2 versions), "
+          f"{len(pm_exact)} with exactly v1..v{N_VERSIONS}")
 
-    # ── Spaghetti plots (absolute values + bold mean) ─────────────────────────
-    _plot_spaghetti_grid(
-        paper_metrics, by_v, n_at_v, _SIMPLE_SPECS,
-        title   = f"Simple Text Metrics — Individual Trajectories  (n={n_total} papers)",
-        outpath = ROOT / "simple_metrics_over_versions.png",
+    by_v_norm, n_at_v_norm = aggregate_normalized(pm_exact)
+    norm_paper_metrics     = build_normalized_paper_metrics(pm_exact)
+    by_step                = aggregate_stepwise(pm_exact)
+    net_change             = build_net_change(pm_exact)
+
+    # Trajectory features for the scatter use ALL papers (any version count).
+    feats_simple  = build_trajectory_features(paper_metrics, [k for k, *_ in _SIMPLE_SPECS])
+    feats_complex = build_trajectory_features(paper_metrics, [k for k, *_ in _COMPLEX_SPECS])
+
+    n_total = len(pm_exact)
+    n_traj  = len(paper_metrics)
+
+    # Per-metric-group subfolders; papers_per_version stays at the plots/ root.
+    simple_dir  = PLOTS_DIR / "simple_metrics"
+    complex_dir = PLOTS_DIR / "complexity"
+    for d in (PLOTS_DIR, simple_dir, complex_dir):
+        d.mkdir(parents=True, exist_ok=True)
+
+    # ── Papers-per-version distribution (whole corpus, all version counts) ─────
+    version_counts, n_all = _scan_version_distribution(XML_DIR)
+    _plot_version_distribution(
+        version_counts, n_all,
+        outpath = PLOTS_DIR / "papers_per_version.png",
     )
-    _plot_spaghetti_grid(
-        paper_metrics, by_v, n_at_v, _COMPLEX_SPECS,
-        title   = f"Linguistic Complexity — Individual Trajectories  (n={n_total} papers)",
-        outpath = ROOT / "complexity_over_versions.png",
-    )
 
-    # ── Normalised plots (% change from v1) ───────────────────────────────────
-    _plot_normalized_grid(
-        by_v_norm, n_at_v_norm, _SIMPLE_SPECS,
+    # ── Combined plots: individual % change trajectories + mean ±1 SD ─────────
+    _plot_normalized_spaghetti_grid(
+        norm_paper_metrics, by_v_norm, n_at_v_norm, _SIMPLE_SPECS,
         title   = f"Simple Text Metrics — Change from v1 (%)  (n={n_total} papers)",
-        outpath = ROOT / "simple_metrics_normalized.png",
+        outpath = simple_dir / "normalized_over_versions.png",
     )
-    _plot_normalized_grid(
-        by_v_norm, n_at_v_norm, _COMPLEX_SPECS,
+    _plot_normalized_spaghetti_grid(
+        norm_paper_metrics, by_v_norm, n_at_v_norm, _COMPLEX_SPECS,
         title   = f"Linguistic Complexity — Change from v1 (%)  (n={n_total} papers)",
-        outpath = ROOT / "complexity_normalized.png",
+        outpath = complex_dir / "normalized_over_versions.png",
     )
 
-    plt.show()
-    print("Done.")
+    # ── Step-wise plots: mean % change vs the immediately preceding version ────
+    _plot_stepwise_grid(
+        by_step, _SIMPLE_SPECS,
+        title   = f"Simple Text Metrics — Change vs Previous Version (%)  (n={n_total} papers)",
+        outpath = simple_dir / "stepwise_over_versions.png",
+    )
+    _plot_stepwise_grid(
+        by_step, _COMPLEX_SPECS,
+        title   = f"Linguistic Complexity — Change vs Previous Version (%)  (n={n_total} papers)",
+        outpath = complex_dir / "stepwise_over_versions.png",
+    )
+
+    # ── Direction-of-change plots: share of papers up / ~equal / down per step ─
+    _plot_direction_grid(
+        by_step, _SIMPLE_SPECS, semantic=False,
+        title   = f"Simple Text Metrics — Direction of Change per Step  (n={n_total} papers)",
+        outpath = simple_dir / "direction_over_versions.png",
+    )
+    _plot_direction_grid(
+        by_step, _COMPLEX_SPECS, semantic=True,
+        title   = f"Linguistic Complexity — Direction of Change per Step  (n={n_total} papers)",
+        outpath = complex_dir / "direction_over_versions.png",
+    )
+
+    # ── Distribution of per-paper net change (reveals masked sub-populations) ──
+    _plot_netchange_distribution(
+        net_change, _SIMPLE_SPECS, semantic=False,
+        title   = f"Simple Text Metrics — Distribution of Net Change (last vs v1)  (n={n_total} papers)",
+        outpath = simple_dir / "distribution.png",
+    )
+    _plot_netchange_distribution(
+        net_change, _COMPLEX_SPECS, semantic=True,
+        title   = f"Linguistic Complexity — Distribution of Net Change (last vs v1)  (n={n_total} papers)",
+        outpath = complex_dir / "distribution.png",
+    )
+
+    # ── Trajectory scatter: net change vs monotonicity (all papers) ───────────
+    _plot_trajectory_scatter(
+        feats_simple, _SIMPLE_SPECS,
+        title   = f"Simple Text Metrics — Net Change vs Monotonicity  (n={n_traj} papers, all version counts)",
+        outpath = simple_dir / "scatter.png",
+    )
+    _plot_trajectory_scatter(
+        feats_complex, _COMPLEX_SPECS,
+        title   = f"Linguistic Complexity — Net Change vs Monotonicity  (n={n_traj} papers, all version counts)",
+        outpath = complex_dir / "scatter.png",
+    )
+
+    # ── Regression-to-the-mean: v1 baseline vs net change (all papers) ────────
+    _plot_baseline_change_scatter(
+        feats_simple, _SIMPLE_SPECS,
+        title   = f"Simple Text Metrics — Baseline vs Net Change  (n={n_traj} papers, all version counts)",
+        outpath = simple_dir / "baseline_change.png",
+    )
+    _plot_baseline_change_scatter(
+        feats_complex, _COMPLEX_SPECS,
+        title   = f"Linguistic Complexity — Baseline vs Net Change  (n={n_traj} papers, all version counts)",
+        outpath = complex_dir / "baseline_change.png",
+    )
+
+    print(f'Plots saved to folder "{PLOTS_DIR.name}/" '
+          f'(papers_per_version.png + simple_metrics/ + complexity/)')
 
 
 if __name__ == "__main__":
