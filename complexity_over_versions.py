@@ -258,21 +258,67 @@ def compute_metrics(text: str) -> Optional[dict]:
 # AGGREGATION
 # ═══════════════════════════════════════════════════════════════════════════════
 
-def aggregate(papers: dict) -> tuple:
-    """Collect metric values per version number across all papers."""
-    by_v: dict = defaultdict(lambda: defaultdict(list))
+def build_paper_metrics(papers: dict) -> dict:
+    """
+    Compute all metrics per paper per version.
+    Returns {doi: {version: {metric: value}}}.
+    """
+    result = {}
     for doi, versions in papers.items():
+        paper_data = {}
         for vd in versions:
             v = vd["version"]
-            by_v[v]["n_sections"].append(vd["n_sections"])
-            by_v[v]["n_figures" ].append(vd["n_figures"])
-            by_v[v]["n_tables"  ].append(vd["n_tables"])
-            by_v[v]["n_refs"    ].append(vd["n_refs"])
+            entry = {
+                "n_sections": vd["n_sections"],
+                "n_figures":  vd["n_figures"],
+                "n_tables":   vd["n_tables"],
+                "n_refs":     vd["n_refs"],
+            }
             cx = compute_metrics(vd["full_text"])
             if cx:
-                for k, val in cx.items():
+                entry.update(cx)
+            paper_data[v] = entry
+        if len(paper_data) >= 2:
+            result[doi] = paper_data
+    return result
+
+
+def _clean_val(v) -> bool:
+    return v is not None and not (isinstance(v, float) and (np.isnan(v) or np.isinf(v)))
+
+
+def aggregate_absolute(paper_metrics: dict) -> tuple:
+    """Per-version mean ± SD in absolute values across all papers."""
+    by_v: dict = defaultdict(lambda: defaultdict(list))
+    for doi, versions in paper_metrics.items():
+        for v, metrics in versions.items():
+            for k, val in metrics.items():
+                if _clean_val(val):
                     by_v[v][k].append(val)
-    n_at_v = {v: len(by_v[v]["n_sections"]) for v in by_v}
+    n_at_v = {v: len(by_v[v].get("n_sections", [])) for v in by_v}
+    return {v: dict(d) for v, d in by_v.items()}, n_at_v
+
+
+def aggregate_normalized(paper_metrics: dict) -> tuple:
+    """
+    Per-version mean ± SD of % change relative to v1 across all papers.
+    v1 is always 0 %. Papers where v1 value is 0 are skipped for that metric.
+    """
+    by_v: dict = defaultdict(lambda: defaultdict(list))
+    for doi, versions in paper_metrics.items():
+        v1 = versions.get(1)
+        if not v1:
+            continue
+        for v, metrics in versions.items():
+            for k, val in metrics.items():
+                baseline = v1.get(k)
+                if not _clean_val(baseline) or not _clean_val(val):
+                    continue
+                if abs(baseline) < 1e-9:
+                    continue
+                pct = (val - baseline) / abs(baseline) * 100
+                by_v[v][k].append(pct if v > 1 else 0.0)
+    n_at_v = {v: len(by_v[v].get("n_sections", [])) for v in by_v}
     return {v: dict(d) for v, d in by_v.items()}, n_at_v
 
 
@@ -301,15 +347,27 @@ _COMPLEX_SPECS = [
 _COLORS = ["#2166AC", "#1A9850", "#D6604D", "#762A83", "#E08214", "#4D4D4D"]
 
 
-def _plot_grid(
+def _xtick_labels(xs: list, n_at_v: dict) -> list:
+    return [f"v{int(x)}\n(n={n_at_v.get(int(x), '?')})" for x in xs]
+
+
+def _plot_spaghetti_grid(
+    paper_metrics: dict,
     by_v: dict,
     n_at_v: dict,
     specs: list,
     title: str,
     outpath: Path,
     min_n: int = 3,
+    max_lines: int = 400,
 ) -> None:
+    """Spaghetti plot: individual paper trajectories (thin, transparent) + bold mean."""
     versions = sorted(v for v in by_v if n_at_v.get(v, 0) >= min_n)
+
+    # Subsample papers for display if corpus is large
+    doi_list = list(paper_metrics.keys())
+    if len(doi_list) > max_lines:
+        doi_list = random.Random(0).sample(doi_list, max_lines)
 
     fig, axes = plt.subplots(2, 3, figsize=(15, 8))
     axes = axes.flatten()
@@ -317,12 +375,65 @@ def _plot_grid(
 
     for idx, ((key, label, unit), color) in enumerate(zip(specs, _COLORS)):
         ax = axes[idx]
+
+        # Individual paper lines
+        for doi in doi_list:
+            pv = paper_metrics[doi]
+            xs_p = sorted(v for v in pv if _clean_val(pv[v].get(key)))
+            if len(xs_p) < 2:
+                continue
+            ys_p = [pv[v][key] for v in xs_p]
+            ax.plot(xs_p, ys_p, lw=0.5, alpha=0.08, color=color)
+
+        # Bold mean line
+        xs, means = [], []
+        for v in versions:
+            vals = [x for x in by_v[v].get(key, []) if _clean_val(x)]
+            if vals:
+                xs.append(v)
+                means.append(np.mean(vals))
+
+        if not xs:
+            ax.text(0.5, 0.5, "no data", ha="center", va="center",
+                    transform=ax.transAxes, color="gray")
+            ax.set_title(label, fontsize=10, fontweight="bold")
+            continue
+
+        ax.plot(xs, means, "o-", lw=2.5, ms=5, color=color, zorder=5, label="mean")
+        ax.set_title(label, fontsize=10, fontweight="bold")
+        ax.set_ylabel(unit, fontsize=8)
+        ax.set_xlabel("Version", fontsize=8)
+        ax.set_xticks(xs)
+        ax.set_xticklabels(_xtick_labels(xs, n_at_v), fontsize=7)
+        ax.grid(True, alpha=0.3, linestyle="--")
+        if idx == 0:
+            ax.legend(fontsize=8)
+
+    plt.tight_layout()
+    plt.savefig(outpath, dpi=150, bbox_inches="tight")
+    print(f"Saved -> {outpath}")
+
+
+def _plot_normalized_grid(
+    by_v_norm: dict,
+    n_at_v: dict,
+    specs: list,
+    title: str,
+    outpath: Path,
+    min_n: int = 3,
+) -> None:
+    """% change from v1: mean line + shaded ±1 SD band."""
+    versions = sorted(v for v in by_v_norm if n_at_v.get(v, 0) >= min_n)
+
+    fig, axes = plt.subplots(2, 3, figsize=(15, 8))
+    axes = axes.flatten()
+    fig.suptitle(title, fontsize=13, fontweight="bold")
+
+    for idx, ((key, label, _unit), color) in enumerate(zip(specs, _COLORS)):
+        ax = axes[idx]
         xs, means, stds = [], [], []
         for v in versions:
-            vals = [
-                x for x in by_v[v].get(key, [])
-                if x is not None and not (isinstance(x, float) and np.isnan(x))
-            ]
+            vals = [x for x in by_v_norm[v].get(key, []) if _clean_val(x)]
             if vals:
                 xs.append(v)
                 means.append(np.mean(vals))
@@ -334,23 +445,19 @@ def _plot_grid(
             ax.set_title(label, fontsize=10, fontweight="bold")
             continue
 
-        xs    = np.array(xs)
-        means = np.array(means)
-        stds  = np.array(stds)
+        xs, means, stds = np.array(xs), np.array(means), np.array(stds)
 
-        ax.plot(xs, means, "o-", lw=2, ms=5, color=color, label="mean")
-        ax.fill_between(xs, means - stds, means + stds, alpha=0.18, color=color, label="±1 SD")
+        ax.axhline(0, color="gray", lw=1, linestyle="--", alpha=0.6, zorder=1)
+        ax.plot(xs, means, "o-", lw=2, ms=5, color=color, zorder=5, label="mean % change")
+        ax.fill_between(xs, means - stds, means + stds, alpha=0.18, color=color, label="+/-1 SD")
         ax.set_title(label, fontsize=10, fontweight="bold")
-        ax.set_ylabel(unit, fontsize=8)
+        ax.set_ylabel("% change from v1", fontsize=8)
         ax.set_xlabel("Version", fontsize=8)
         ax.set_xticks(xs)
-        ax.set_xticklabels(
-            [f"v{int(x)}\n(n={n_at_v[int(x)]})" for x in xs],
-            fontsize=7,
-        )
+        ax.set_xticklabels(_xtick_labels(xs, n_at_v), fontsize=7)
         ax.grid(True, alpha=0.3, linestyle="--")
         if idx == 0:
-            ax.legend(fontsize=8, loc="best")
+            ax.legend(fontsize=8)
 
     plt.tight_layout()
     plt.savefig(outpath, dpi=150, bbox_inches="tight")
@@ -373,24 +480,39 @@ def main() -> None:
     if not papers:
         sys.exit("No valid papers found.")
 
+    if not COMMON_WORDS:
+        print("Warning: NLTK Brown corpus unavailable -- rare-word rate will be NaN.")
+
     print("Computing metrics ...", flush=True)
-    by_v, n_at_v = aggregate(papers)
+    paper_metrics           = build_paper_metrics(papers)
+    by_v,      n_at_v      = aggregate_absolute(paper_metrics)
+    by_v_norm, n_at_v_norm = aggregate_normalized(paper_metrics)
     print(f"Papers per version: { {v: n_at_v[v] for v in sorted(n_at_v)} }")
 
-    if not COMMON_WORDS:
-        print("Warning: NLTK Brown corpus unavailable — rare-word rate will be NaN.")
+    n_total = len(paper_metrics)
 
-    n_total = len(papers)
-
-    _plot_grid(
-        by_v, n_at_v, _SIMPLE_SPECS,
-        title   = f"Simple Text Metrics over Version History  (n={n_total} papers)",
+    # ── Spaghetti plots (absolute values + bold mean) ─────────────────────────
+    _plot_spaghetti_grid(
+        paper_metrics, by_v, n_at_v, _SIMPLE_SPECS,
+        title   = f"Simple Text Metrics — Individual Trajectories  (n={n_total} papers)",
         outpath = ROOT / "simple_metrics_over_versions.png",
     )
-    _plot_grid(
-        by_v, n_at_v, _COMPLEX_SPECS,
-        title   = f"Linguistic Complexity over Version History  (n={n_total} papers)",
+    _plot_spaghetti_grid(
+        paper_metrics, by_v, n_at_v, _COMPLEX_SPECS,
+        title   = f"Linguistic Complexity — Individual Trajectories  (n={n_total} papers)",
         outpath = ROOT / "complexity_over_versions.png",
+    )
+
+    # ── Normalised plots (% change from v1) ───────────────────────────────────
+    _plot_normalized_grid(
+        by_v_norm, n_at_v_norm, _SIMPLE_SPECS,
+        title   = f"Simple Text Metrics — Change from v1 (%)  (n={n_total} papers)",
+        outpath = ROOT / "simple_metrics_normalized.png",
+    )
+    _plot_normalized_grid(
+        by_v_norm, n_at_v_norm, _COMPLEX_SPECS,
+        title   = f"Linguistic Complexity — Change from v1 (%)  (n={n_total} papers)",
+        outpath = ROOT / "complexity_normalized.png",
     )
 
     plt.show()
