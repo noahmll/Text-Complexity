@@ -7,3 +7,4 @@ xml/
 __MACOSX/
 plots/
 .venv/
+graphify-out/

@@ -56,21 +56,25 @@ python complexity_over_versions.py --n 200         # 200 zufällige Papers
 python complexity_over_versions.py --n 200 --seed 42   # reproduzierbares Sample
 ```
 
-Das Skript erzeugt 13 Abbildungen im Ordner `plots/` — die Übersicht im Root,
-die sechs Sichten je in einem Unterordner pro Metrik-Gruppe:
+**Abstract und Volltext (Body) werden getrennt analysiert.** Das Skript erzeugt die
+Übersicht im Root plus je sechs Sichten pro Metrik-Gruppe und Textquelle:
 
 ```
 plots/
 ├── papers_per_version.png          # Anzahl Papers je Version (ganzer Korpus)
-├── simple_metrics/                 # Wortzahl, Sections, Figures, Tables, Refs, Satzlänge
-│   ├── normalized_over_versions.png    # % Änderung ggü. v1
-│   ├── stepwise_over_versions.png      # % Änderung ggü. Vorgänger
-│   ├── direction_over_versions.png     # Richtungs-Anteil je Schritt
-│   ├── distribution.png                # Verteilung der Netto-Änderung
-│   ├── scatter.png                     # Netto-Änderung × Monotonie
-│   └── baseline_change.png             # v1-Ausgangswert × Netto-Änderung
-└── complexity/                     # Flesch, Wortlänge, TTR, Rare-Word, Nominalisierung, Satzlänge
-    └── (dieselben sechs Dateien)
+├── body/                           # Volltext (ohne Abstract, ohne Refs/Figures/Tables/Formeln)
+│   ├── simple_metrics/             # Wortzahl, Sections, Figures, Tables, Refs, Satzlänge
+│   │   ├── normalized_over_versions.png    # % Änderung ggü. v1
+│   │   ├── stepwise_over_versions.png      # % Änderung ggü. Vorgänger
+│   │   ├── direction_over_versions.png     # Richtungs-Anteil je Schritt
+│   │   ├── distribution.png                # Verteilung der Netto-Änderung
+│   │   ├── scatter.png                     # Netto-Änderung × Volatilität
+│   │   └── baseline_change.png             # v1-Ausgangswert × Netto-Änderung
+│   └── complexity/                 # Flesch, Wortlänge, TTR, Rare-Word, Nominalisierung, Satzlänge
+│       └── (dieselben sechs Dateien)
+└── abstract/                       # nur Komplexität (Strukturmetriken im Abstract sinnlos)
+    └── complexity/
+        └── (dieselben sechs Dateien)
 ```
 
 **Sechs Sichten auf dieselben Metriken:**
@@ -89,8 +93,10 @@ plots/
   (letzte Version vs. v1) mit Median-Linie und Anteil einfacher/komplexer. Deckt auf, ob ein
   Mittelwert nahe 0 echte Stabilität bedeutet oder zwei gegenläufige Teilpopulationen verdeckt.
 - **Scatter (`scatter.png`)** — ein Punkt je Paper: x = **Netto-Änderung** (letzte vs. v1),
-  y = **Monotonie-Index** `|v_last − v1| / Σ|Schritt-Deltas|` (1 = stabil/linear, →0 = volatil).
-  Läuft über **alle** Papers (beliebige Versionszahl).
+  y = **Volatilität** = RMSE der Residuen um den linearen Trend (Wert ~ Versionsindex), in
+  % des v1-Werts (0 = exakt linear, größer = erratischer). Der lineare Fit absorbiert die
+  Gesamtrichtung, sodass y nur das „Gezappel" um den Trend misst — weitgehend unabhängig von
+  der Netto-Änderung. Läuft über **alle** Papers (beliebige Versionszahl).
 - **Baseline-Change (`baseline_change.png`)** — ein Punkt je Paper: x = **v1-Ausgangswert**,
   y = **Netto-Änderung** (% ggü. v1), mit Fit-Linie und Pearson r. Negative Steigung =
   **Regression zur Mitte** (hoch startende Papers fallen, niedrig startende steigen →
@@ -106,15 +112,20 @@ Rohdaten liegen unter `data/` (gitignored) und stammen aus bioRxiv im **JATS-XML
 - Versionszugehörigkeit wird über das `_vN`-Suffix im Dateinamen gruppiert
 - `dois.txt` — 958 DOIs der untersuchten Preprints
 
-**Filterregeln** (`_scan_file_groups`): Ein Paper geht nur in die Auswertung ein, wenn es
-**genau die Versionen v1–v6** besitzt (`N_VERSIONS = 6`); Papers mit weniger oder mehr
-Versionen werden ausgeschlossen. Versionen mit < 300 Zeichen Volltext bzw. < 200 Wörtern
-werden verworfen — verliert ein Paper dadurch eine Version, fällt es ganz aus der Analyse.
+**Filterregeln:** Geladen werden alle Papers mit **lückenlosen Versionen ab v1** (≥ 2).
+Versionen mit < 300 Zeichen Body-Text werden verworfen. Die **versions-ausgerichteten
+Sichten** (kumulativ, schrittweise, Richtung, Verteilung) nutzen daraus die Teilmenge mit
+**genau v1–v6** (`N_VERSIONS = 6`, konstantes n je Version); **Scatter und Baseline-Change**
+laufen über **alle** Papers (beliebige Versionszahl). Wortzahl-Mindestschwelle für die
+Metrik-Berechnung: 200 Wörter (Body), 100 Wörter (Abstract).
 
-**XML-Verarbeitung:** Abstract + Body werden rekursiv eingesammelt; `fig`, `table-wrap`,
-`supplementary-material`, `disp-formula` und `inline-formula` werden übersprungen, damit
-Abbildungs-, Tabellen- und Formelinhalte die Sprachmetriken nicht verzerren. Zusätzlich
-werden je Version Strukturzähler erfasst: Top-Level-Abschnitte, Abbildungen, Tabellen, Referenzen.
+**XML-Verarbeitung:** **Abstract und Body werden getrennt** rekursiv eingesammelt. Im Body
+werden `fig`, `table-wrap`, `supplementary-material`, `disp-formula` und `inline-formula`
+übersprungen, damit Abbildungs-, Tabellen- und Formelinhalte die Sprachmetriken nicht
+verzerren. **Inline-Zitationen** (`<xref ref-type="bibr">`, z. B. „12" oder „Smith et al.")
+werden in beiden Quellen entfernt. Die Referenzliste liegt im JATS unter `<back>` und ist
+damit ohnehin nicht im Body. Zusätzlich werden je Version Strukturzähler erfasst (Body):
+Top-Level-Abschnitte, Abbildungen, Tabellen, Referenzen.
 
 ---
 
